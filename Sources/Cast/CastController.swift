@@ -54,8 +54,8 @@ final class CastController {
 
     private func startConnection() {
         guard let endpoint else { return }
-        conn.onMessage    = { [weak self] msg in self?.handle(msg) }
-        conn.onDisconnect = { [weak self] in self?.scheduleReconnect() }
+        conn.onMessage    = { [weak self] msg in Task { @MainActor [weak self] in self?.handle(msg) } }
+        conn.onDisconnect = { [weak self] in    Task { @MainActor [weak self] in self?.scheduleReconnect() } }
         conn.connect(to: endpoint)
         startHeartbeat()
         // Send CONNECT on the transport namespace, then ask for current volume.

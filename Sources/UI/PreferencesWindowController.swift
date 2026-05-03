@@ -23,9 +23,10 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         buildWindow(audioDevices: AudioDevices.outputDeviceNames(), current: config)
 
         guard let win = window else { return }
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
 
-        // Phase 2: start discovery before entering the modal loop so it runs
-        // concurrently while the dialog is open.
+        // Phase 2: discover Chromecasts while the dialog is open.
         Task {
             var devices = await ChromecastDiscovery.discover(timeout: .seconds(3))
             // Always include the currently configured device even if not found.
@@ -37,8 +38,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
             }
             populateCast(devices: devices, current: config.castDeviceName)
         }
-
-        NSApp.runModal(for: win)
     }
 
     // MARK: - Build window
@@ -138,7 +137,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         cfg.audioDeviceName = audioPopup?.titleOfSelectedItem ?? ""
         cfg.castDeviceName  = castPopup?.titleOfSelectedItem  ?? ""
         self.window = nil
-        NSApp.stopModal()
         win.orderOut(nil)
         onSave?(cfg)
     }
@@ -154,7 +152,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     private func dismiss() {
         guard let win = window else { return }
         self.window = nil
-        NSApp.stopModal()
         win.orderOut(nil)
     }
 

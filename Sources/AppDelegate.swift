@@ -8,8 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBar:  StatusBarController!
     private var prefs:      PreferencesWindowController!
 
-    private var volumeBeforeMute: Float = 0.5
-    private var currentVolume:    ReceiverVolume = ReceiverVolume(level: 0.5, muted: false)
+    private var volumeBeforeMute:       Float = 0.5
+    private var currentVolume:          ReceiverVolume = ReceiverVolume(level: 0.5, muted: false)
+    private var suppressFeedbackUntil:  Date = .distantPast
 
     // MARK: - Launch
 
@@ -25,9 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar.onPreferences   = { [weak self] in     self?.showPreferences() }
         statusBar.onQuit          = { NSApp.terminate(nil) }
 
-        // Wire up Cast controller callback
+        // Wire up Cast controller callback — ignore feedback while slider is being dragged.
         cast.onVolumeChanged = { [weak self] vol in
             guard let self else { return }
+            guard Date() >= self.suppressFeedbackUntil else { return }
             self.currentVolume = vol
             self.statusBar.update(volume: vol)
         }
@@ -59,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleSlider(_ vol: Float) {
+        currentVolume.level = vol
+        suppressFeedbackUntil = Date().addingTimeInterval(1.0)
         cast.setVolume(vol)
     }
 
