@@ -14,6 +14,8 @@ import (
 	"log"
 	"math"
 	"runtime"
+	"sync"
+	"time"
 	"unsafe"
 
 	"fyne.io/systray"
@@ -21,55 +23,66 @@ import (
 	"github.com/vishen/go-chromecast/dns"
 )
 
-const (
-	keyVolumeUp     = 0 // NX_KEYTYPE_SOUND_UP
-	keyVolumeDown   = 1 // NX_KEYTYPE_SOUND_DOWN
-	keyVolumeMute   = 7 // NX_KEYTYPE_MUTE
-	step            = 0.02
-	deviceName      = "Panasonic PMX802M-25e2" // Chromecast mDNS name
-	audioDeviceName = "Panasonic USB Audio 2"  // macOS audio output device name (System Settings > Sound > Output)
-)
-
 var (
-	app        *application.Application
+	cfgMu sync.RWMutex
+	cfg   Config
+
+	appMu sync.RWMutex
+	app   *application.Application
+
 	menuVolume *systray.MenuItem
 	menuMute   *systray.MenuItem
+	menuPrefs  *systray.MenuItem
 )
 
 //export goHandleKey
 func goHandleKey(keycode int) C.int {
 	cname := C.getDefaultAudioOutputDeviceName()
 	if cname == nil {
-		return 0 // can't determine device — pass through
+		return 0
 	}
 	name := C.GoString(cname)
 	C.free(unsafe.Pointer(cname))
 
-	if name != audioDeviceName {
-		return 0 // different output device — pass through
+	cfgMu.RLock()
+	wantAudio := cfg.AudioDeviceName
+	cfgMu.RUnlock()
+
+	if wantAudio == "" || name != wantAudio {
+		return 0 // not our device — pass through
 	}
 
-	if app == nil {
-		return 0 // not yet connected
+	appMu.RLock()
+	a := app
+	appMu.RUnlock()
+	if a == nil {
+		return 0
 	}
 
 	switch int(keycode) {
 	case keyVolumeUp:
-		adjustVolume(+step)
+		adjustVolume(a, +step)
 	case keyVolumeDown:
-		adjustVolume(-step)
+		adjustVolume(a, -step)
 	case keyVolumeMute:
-		toggleMute()
+		toggleMute(a)
 	}
 	return 1
 }
 
-func currentVolume() float32 {
-	if err := app.Update(); err != nil {
+const (
+	keyVolumeUp   = 0 // NX_KEYTYPE_SOUND_UP
+	keyVolumeDown = 1 // NX_KEYTYPE_SOUND_DOWN
+	keyVolumeMute = 7 // NX_KEYTYPE_MUTE
+	step          = 0.02
+)
+
+func currentVolume(a *application.Application) float32 {
+	if err := a.Update(); err != nil {
 		log.Printf("error reading volume from device: %v", err)
 		return 0.5
 	}
-	if v := app.Volume(); v != nil {
+	if v := a.Volume(); v != nil {
 		return v.Level
 	}
 	return 0.5
@@ -87,9 +100,9 @@ func setMenuVolume(vol float32, muted bool) {
 	}
 }
 
-func adjustVolume(delta float32) {
-	vol := float32(math.Max(0, math.Min(1, float64(currentVolume()+delta))))
-	if err := app.SetVolume(vol); err != nil {
+func adjustVolume(a *application.Application, delta float32) {
+	vol := float32(math.Max(0, math.Min(1, float64(currentVolume(a)+delta))))
+	if err := a.SetVolume(vol); err != nil {
 		log.Printf("error setting volume: %v", err)
 		return
 	}
@@ -98,28 +111,28 @@ func adjustVolume(delta float32) {
 
 var volumeBeforeMute float32
 
-func toggleMute() {
-	if err := app.Update(); err != nil {
+func toggleMute(a *application.Application) {
+	if err := a.Update(); err != nil {
 		log.Printf("error reading state from device: %v", err)
 		return
 	}
-	v := app.Volume()
+	v := a.Volume()
 	if v == nil {
 		return
 	}
 	if v.Muted {
-		if err := app.SetMuted(false); err != nil {
+		if err := a.SetMuted(false); err != nil {
 			log.Printf("error unmuting: %v", err)
 			return
 		}
-		if err := app.SetVolume(volumeBeforeMute); err != nil {
+		if err := a.SetVolume(volumeBeforeMute); err != nil {
 			log.Printf("error restoring volume: %v", err)
 			return
 		}
 		setMenuVolume(volumeBeforeMute, false)
 	} else {
 		volumeBeforeMute = v.Level
-		if err := app.SetMuted(true); err != nil {
+		if err := a.SetMuted(true); err != nil {
 			log.Printf("error muting: %v", err)
 			return
 		}
@@ -127,57 +140,92 @@ func toggleMute() {
 	}
 }
 
+// connectDevice discovers and connects to the named Chromecast.
+// Safe to call from any goroutine; updates the menu accordingly.
+func connectDevice(castName string) {
+	menuVolume.SetTitle("Connecting…")
+	menuMute.Disable()
+	systray.SetTitle("🔊")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	entry, err := dns.DiscoverCastDNSEntryByName(ctx, nil, castName)
+	if err != nil {
+		menuVolume.SetTitle("Device not found")
+		log.Printf("could not find %q: %v", castName, err)
+		return
+	}
+
+	newApp := application.NewApplication()
+	if err := newApp.Start(entry.GetAddr(), entry.GetPort()); err != nil {
+		menuVolume.SetTitle("Connection failed")
+		log.Printf("could not connect to %q: %v", castName, err)
+		return
+	}
+
+	appMu.Lock()
+	if app != nil {
+		app.Close(false)
+	}
+	app = newApp
+	appMu.Unlock()
+
+	if v := newApp.Volume(); v != nil {
+		setMenuVolume(v.Level, v.Muted)
+	}
+	menuMute.Enable()
+	log.Printf("connected to %s", castName)
+}
+
 func onReady() {
 	systray.SetTitle("🔊")
-	systray.SetTooltip(deviceName)
+	systray.SetTooltip("stereo-vol")
 
-	menuVolume = systray.AddMenuItem("Connecting…", "")
+	menuVolume = systray.AddMenuItem("Not configured", "")
 	menuVolume.Disable()
 	menuMute = systray.AddMenuItem("Mute", "")
 	menuMute.Disable()
 	systray.AddSeparator()
+	menuPrefs = systray.AddMenuItem("Preferences…", "")
+	systray.AddSeparator()
 	menuQuit := systray.AddMenuItem("Quit", "")
 
-	// Connect to Chromecast in the background
+	// Load persisted config and connect if configured.
+	cfgMu.Lock()
+	cfg = loadConfig()
+	castName := cfg.CastDeviceName
+	cfgMu.Unlock()
+
+	if castName != "" {
+		go connectDevice(castName)
+	}
+
+	// Start the event tap on a dedicated OS thread once systray is up.
 	go func() {
-		ctx := context.Background()
-		entry, err := dns.DiscoverCastDNSEntryByName(ctx, nil, deviceName)
-		if err != nil {
-			menuVolume.SetTitle("Device not found")
-			log.Printf("could not find device %q: %v", deviceName, err)
-			return
-		}
-
-		app = application.NewApplication()
-		if err := app.Start(entry.GetAddr(), entry.GetPort()); err != nil {
-			menuVolume.SetTitle("Connection failed")
-			log.Printf("could not connect: %v", err)
-			return
-		}
-
-		if v := app.Volume(); v != nil {
-			setMenuVolume(v.Level, v.Muted)
-		}
-		menuMute.Enable()
-
-		// Start the event tap on a dedicated locked OS thread
-		go func() {
-			runtime.LockOSThread()
-			C.runEventTap()
-		}()
+		runtime.LockOSThread()
+		C.runEventTap()
 	}()
 
-	// Handle menu clicks
+	// Handle menu clicks.
 	go func() {
 		for {
 			select {
 			case <-menuMute.ClickedCh:
-				if app != nil {
-					toggleMute()
+				appMu.RLock()
+				a := app
+				appMu.RUnlock()
+				if a != nil {
+					toggleMute(a)
 				}
+			case <-menuPrefs.ClickedCh:
+				go openPreferences()
 			case <-menuQuit.ClickedCh:
-				if app != nil {
-					app.Close(false)
+				appMu.RLock()
+				a := app
+				appMu.RUnlock()
+				if a != nil {
+					a.Close(false)
 				}
 				systray.Quit()
 			}
