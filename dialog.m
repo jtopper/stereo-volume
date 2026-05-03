@@ -1,80 +1,184 @@
 #import <AppKit/AppKit.h>
 #include <stdlib.h>
 
-// showConfigDialog presents a modal preferences dialog on the main thread.
-// audioDevices / castDevices are arrays of C strings (not freed here).
-// On Save, *outAudio and *outCast are set to malloc'd copies of the selections.
-// Returns 1 if the user saved, 0 if they cancelled.
-int showConfigDialog(
-    char **audioDevices, int audioCount,
-    char **castDevices,  int castCount,
-    const char *currentAudio, const char *currentCast,
-    char **outAudio, char **outCast
-) {
-    __block int   result   = 0;
-    __block char *selAudio = NULL;
-    __block char *selCast  = NULL;
+extern void goConfigResult(int saved, const char *audio, const char *cast);
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        NSAlert *alert        = [[NSAlert alloc] init];
-        alert.messageText     = @"stereo-vol Preferences";
-        alert.informativeText = @"Select the audio output and Chromecast device to control.";
-        [alert addButtonWithTitle:@"Save"];
-        [alert addButtonWithTitle:@"Cancel"];
+// Controls that need updating after the dialog is open.
+static NSWindow            *configWindow = nil;
+static NSPopUpButton       *audioPopup   = nil;
+static NSPopUpButton       *castPopup    = nil;
+static NSProgressIndicator *castSpinner  = nil;
+static NSTextField         *castStatus   = nil;
+static NSButton            *saveButton   = nil;
+static NSString            *pendingCast  = nil; // current cast name, for pre-selection
 
-        NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 390, 72)];
+// ── Delegate ──────────────────────────────────────────────────────────────
 
-        // Row 1 — audio output
-        NSTextField *audioLabel = [NSTextField labelWithString:@"Audio Output:"];
-        audioLabel.frame     = NSMakeRect(0, 46, 112, 22);
-        audioLabel.alignment = NSTextAlignmentRight;
+@interface ConfigDelegate : NSObject <NSWindowDelegate>
++ (instancetype)shared;
+- (void)saveClicked:(id)sender;
+- (void)cancelClicked:(id)sender;
+@end
 
-        NSPopUpButton *audioPopup = [[NSPopUpButton alloc]
-            initWithFrame:NSMakeRect(120, 44, 270, 26) pullsDown:NO];
-        if (audioCount > 0) {
-            for (int i = 0; i < audioCount; i++)
-                [audioPopup addItemWithTitle:@(audioDevices[i])];
-            if (currentAudio && strlen(currentAudio) > 0)
-                [audioPopup selectItemWithTitle:@(currentAudio)];
+static ConfigDelegate *configDelegate = nil;
+
+@implementation ConfigDelegate
++ (instancetype)shared {
+    if (!configDelegate) configDelegate = [[ConfigDelegate alloc] init];
+    return configDelegate;
+}
+- (void)saveClicked:(id)sender {
+    if (!configWindow) return;
+    const char *audio = [[audioPopup titleOfSelectedItem] UTF8String];
+    const char *cast  = [[castPopup  titleOfSelectedItem] UTF8String];
+    NSWindow *win = configWindow;
+    configWindow  = nil;
+    [NSApp stopModal];
+    [win orderOut:nil];
+    goConfigResult(1, audio ?: "", cast ?: "");
+}
+- (void)cancelClicked:(id)sender {
+    if (!configWindow) return;
+    NSWindow *win = configWindow;
+    configWindow  = nil;
+    [NSApp stopModal];
+    [win orderOut:nil];
+    goConfigResult(0, NULL, NULL);
+}
+// X button — treat as Cancel.
+- (BOOL)windowShouldClose:(NSWindow *)win {
+    [self cancelClicked:nil];
+    return NO; // we already hid it
+}
+@end
+
+// ── Phase 1: open immediately with audio populated, cast loading ───────────
+
+void openConfigDialog(char **audioDevices, int audioCount,
+                      const char *curAudio, const char *curCast) {
+    if (configWindow) return; // guard against double-open
+
+    // Convert C strings to ObjC objects before dispatching.
+    NSMutableArray *audioArr = [NSMutableArray arrayWithCapacity:audioCount];
+    for (int i = 0; i < audioCount; i++) [audioArr addObject:@(audioDevices[i])];
+    NSString *curAudioStr = curAudio && *curAudio ? @(curAudio) : @"";
+    pendingCast           = curCast  && *curCast  ? @(curCast)  : @"";
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (configWindow) return;
+
+        NSWindow *win = [[NSWindow alloc]
+            initWithContentRect:NSMakeRect(0, 0, 430, 150)
+            styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+            backing:NSBackingStoreBuffered
+            defer:NO];
+        win.title    = @"stereo-vol Preferences";
+        win.delegate = [ConfigDelegate shared];
+        [win center];
+        NSView *cv = win.contentView;
+
+        // ── Audio Output row ─────────────────────────────────────────────
+        NSTextField *al = [NSTextField labelWithString:@"Audio Output:"];
+        al.frame = NSMakeRect(20, 105, 114, 22);
+        al.alignment = NSTextAlignmentRight;
+        [cv addSubview:al];
+
+        audioPopup = [[NSPopUpButton alloc]
+            initWithFrame:NSMakeRect(142, 103, 268, 26) pullsDown:NO];
+        if (audioArr.count > 0) {
+            for (NSString *n in audioArr) [audioPopup addItemWithTitle:n];
+            if (curAudioStr.length > 0) [audioPopup selectItemWithTitle:curAudioStr];
         } else {
             [audioPopup addItemWithTitle:@"No audio output devices found"];
             audioPopup.enabled = NO;
         }
+        [cv addSubview:audioPopup];
 
-        // Row 2 — Chromecast
-        NSTextField *castLabel = [NSTextField labelWithString:@"Chromecast:"];
-        castLabel.frame     = NSMakeRect(0, 10, 112, 22);
-        castLabel.alignment = NSTextAlignmentRight;
+        // ── Chromecast row — loading state ───────────────────────────────
+        NSTextField *cl = [NSTextField labelWithString:@"Chromecast:"];
+        cl.frame = NSMakeRect(20, 65, 114, 22);
+        cl.alignment = NSTextAlignmentRight;
+        [cv addSubview:cl];
 
-        NSPopUpButton *castPopup = [[NSPopUpButton alloc]
-            initWithFrame:NSMakeRect(120, 8, 270, 26) pullsDown:NO];
-        if (castCount > 0) {
-            for (int i = 0; i < castCount; i++)
-                [castPopup addItemWithTitle:@(castDevices[i])];
-            if (currentCast && strlen(currentCast) > 0)
-                [castPopup selectItemWithTitle:@(currentCast)];
+        castSpinner = [[NSProgressIndicator alloc]
+            initWithFrame:NSMakeRect(142, 67, 16, 16)];
+        castSpinner.style       = NSProgressIndicatorStyleSpinning;
+        castSpinner.controlSize = NSControlSizeSmall;
+        [castSpinner startAnimation:nil];
+        [cv addSubview:castSpinner];
+
+        castStatus = [NSTextField labelWithString:@"Discovering Chromecast devices…"];
+        castStatus.frame     = NSMakeRect(164, 67, 246, 18);
+        castStatus.textColor = [NSColor secondaryLabelColor];
+        castStatus.font      = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+        [cv addSubview:castStatus];
+
+        // Hidden dropdown; shown and populated by populateConfigDialogCast.
+        castPopup = [[NSPopUpButton alloc]
+            initWithFrame:NSMakeRect(142, 63, 268, 26) pullsDown:NO];
+        castPopup.hidden = YES;
+        [cv addSubview:castPopup];
+
+        // ── Buttons ──────────────────────────────────────────────────────
+        NSButton *cancelBtn = [NSButton
+            buttonWithTitle:@"Cancel"
+            target:[ConfigDelegate shared]
+            action:@selector(cancelClicked:)];
+        cancelBtn.frame         = NSMakeRect(252, 16, 80, 28);
+        cancelBtn.keyEquivalent = @"\e";
+        [cv addSubview:cancelBtn];
+
+        saveButton = [NSButton
+            buttonWithTitle:@"Save"
+            target:[ConfigDelegate shared]
+            action:@selector(saveClicked:)];
+        saveButton.frame         = NSMakeRect(340, 16, 70, 28);
+        saveButton.keyEquivalent = @"\r";
+        saveButton.enabled       = NO; // enabled by populateConfigDialogCast
+        [cv addSubview:saveButton];
+
+        configWindow = win;
+        [NSApp runModalForWindow:win];
+    });
+}
+
+// postToMain schedules a block on the main run loop in both the default and
+// modal-panel modes. dispatch_async(main_queue) alone won't fire during an
+// NSApp modal session because NSModalPanelRunLoopMode is not in common modes.
+static void postToMain(dispatch_block_t block) {
+    __block BOOL executed = NO;
+    dispatch_block_t once = ^{ if (!executed) { executed = YES; block(); } };
+    CFRunLoopRef rl = CFRunLoopGetMain();
+    CFRunLoopPerformBlock(rl, kCFRunLoopDefaultMode, once);
+    CFRunLoopPerformBlock(rl, (__bridge CFStringRef)NSModalPanelRunLoopMode, once);
+    CFRunLoopWakeUp(rl);
+}
+
+// ── Phase 2: called once Chromecast discovery finishes ────────────────────
+
+void populateConfigDialogCast(char **castDevices, int castCount, const char *curCast) {
+    NSMutableArray *castArr = [NSMutableArray arrayWithCapacity:castCount];
+    for (int i = 0; i < castCount; i++) [castArr addObject:@(castDevices[i])];
+    NSString *curCastStr = curCast && *curCast ? @(curCast) : pendingCast;
+
+    postToMain(^{
+        if (!configWindow) return; // dismissed during discovery
+
+        [castSpinner stopAnimation:nil];
+        castSpinner.hidden = YES;
+        castStatus.hidden  = YES;
+        castPopup.hidden   = NO;
+
+        [castPopup removeAllItems];
+        if (castArr.count > 0) {
+            for (NSString *n in castArr) [castPopup addItemWithTitle:n];
+            if (curCastStr.length > 0) [castPopup selectItemWithTitle:curCastStr];
+            castPopup.enabled = YES;
+            saveButton.enabled = YES;
         } else {
             [castPopup addItemWithTitle:@"No Chromecast devices found"];
-            castPopup.enabled = NO;
-        }
-
-        [box addSubview:audioLabel];
-        [box addSubview:audioPopup];
-        [box addSubview:castLabel];
-        [box addSubview:castPopup];
-        alert.accessoryView = box;
-        [alert layout];
-
-        if ([alert runModal] == NSAlertFirstButtonReturn) {
-            result = 1;
-            NSString *a = [audioPopup titleOfSelectedItem];
-            NSString *c = [castPopup  titleOfSelectedItem];
-            if (a) selAudio = strdup([a UTF8String]);
-            if (c) selCast  = strdup([c UTF8String]);
+            castPopup.enabled  = NO;
+            saveButton.enabled = NO;
         }
     });
-
-    *outAudio = selAudio;
-    *outCast  = selCast;
-    return result;
 }

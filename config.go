@@ -5,13 +5,14 @@ package main
 
 char** getAudioOutputDeviceNames(int *count);
 
-int showConfigDialog(
+void openConfigDialog(
     char **audioDevices, int audioCount,
-    char **castDevices,  int castCount,
-    const char *currentAudio, const char *currentCast,
-    char **outAudio, char **outCast
+    const char *curAudio, const char *curCast
 );
-
+void populateConfigDialogCast(
+    char **castDevices, int castCount,
+    const char *curCast
+);
 void setPrefsItemEnabled(int enabled);
 */
 import "C"
@@ -103,8 +104,6 @@ func audioOutputDeviceNames() []string {
 	return names
 }
 
-// goCStringSlice converts a []string to a []*C.char slice. The caller is
-// responsible for freeing each element and the slice array itself.
 func goCStringSlice(ss []string) []*C.char {
 	out := make([]*C.char, len(ss))
 	for i, s := range ss {
@@ -119,53 +118,99 @@ func freeCStringSlice(cs []*C.char) {
 	}
 }
 
-// openPreferences discovers devices, shows the preferences dialog, and saves
-// if the user confirms. Must be called from a goroutine (not the main thread).
+func cStringSlicePtr(cs []*C.char) **C.char {
+	if len(cs) == 0 {
+		return nil
+	}
+	return (**C.char)(unsafe.Pointer(&cs[0]))
+}
+
+// ── Dialog result channel ─────────────────────────────────────────────────
+
+type configResult struct {
+	saved bool
+	audio string
+	cast  string
+}
+
+var configResultCh = make(chan configResult, 1)
+
+//export goConfigResult
+func goConfigResult(saved C.int, audio *C.char, cast *C.char) {
+	r := configResult{saved: saved != 0}
+	if audio != nil {
+		r.audio = C.GoString(audio)
+	}
+	if cast != nil {
+		r.cast = C.GoString(cast)
+	}
+	select {
+	case configResultCh <- r:
+	default:
+	}
+}
+
+// ── Preferences flow ──────────────────────────────────────────────────────
+
+// openPreferences runs the two-phase preferences dialog.
+// Must be called from a goroutine (not the main thread).
 func openPreferences() {
 	C.setPrefsItemEnabled(0)
 	defer C.setPrefsItemEnabled(1)
 
+	// Phase 1: gather audio devices (instant) and open dialog immediately.
 	audioNames := audioOutputDeviceNames()
-	castNames := discoverChromecasts()
-
 	audioC := goCStringSlice(audioNames)
 	defer freeCStringSlice(audioC)
-	castC := goCStringSlice(castNames)
-	defer freeCStringSlice(castC)
 
 	cfgMu.RLock()
 	curAudio := C.CString(cfg.AudioDeviceName)
 	curCast := C.CString(cfg.CastDeviceName)
+	currentCast := cfg.CastDeviceName
 	cfgMu.RUnlock()
 	defer C.free(unsafe.Pointer(curAudio))
 	defer C.free(unsafe.Pointer(curCast))
 
-	// CGo can't pass a nil **C.char when count == 0, so use a dummy.
-	audioPtr := (**C.char)(nil)
-	if len(audioC) > 0 {
-		audioPtr = (**C.char)(unsafe.Pointer(&audioC[0]))
-	}
-	castPtr := (**C.char)(nil)
-	if len(castC) > 0 {
-		castPtr = (**C.char)(unsafe.Pointer(&castC[0]))
+	C.openConfigDialog(
+		cStringSlicePtr(audioC), C.int(len(audioC)),
+		curAudio, curCast,
+	)
+
+	// Phase 2: discover Chromecasts in the background while dialog is visible.
+	castNames := discoverChromecasts()
+
+	// Ensure the currently configured device is always in the list,
+	// even if it wasn't discovered in the 3 s window.
+	if currentCast != "" {
+		found := false
+		for _, n := range castNames {
+			if n == currentCast {
+				found = true
+				break
+			}
+		}
+		if !found {
+			castNames = append([]string{currentCast}, castNames...)
+		}
 	}
 
-	var outAudio, outCast *C.char
-	saved := C.showConfigDialog(
-		audioPtr, C.int(len(audioC)),
-		castPtr, C.int(len(castC)),
-		curAudio, curCast,
-		&outAudio, &outCast,
+	castC := goCStringSlice(castNames)
+	defer freeCStringSlice(castC)
+
+	C.populateConfigDialogCast(
+		cStringSlicePtr(castC), C.int(len(castC)),
+		curCast,
 	)
-	if saved == 0 {
+
+	// Wait for the user to Save or Cancel.
+	result := <-configResultCh
+	if !result.saved {
 		return
 	}
-	defer C.free(unsafe.Pointer(outAudio))
-	defer C.free(unsafe.Pointer(outCast))
 
 	newCfg := Config{
-		AudioDeviceName: C.GoString(outAudio),
-		CastDeviceName:  C.GoString(outCast),
+		AudioDeviceName: result.audio,
+		CastDeviceName:  result.cast,
 	}
 	if err := saveConfig(newCfg); err != nil {
 		log.Printf("error saving config: %v", err)
@@ -176,7 +221,6 @@ func openPreferences() {
 	cfg = newCfg
 	cfgMu.Unlock()
 
-	// Reconnect only if the Chromecast selection changed.
 	if newCfg.CastDeviceName != oldCast {
 		go connectDevice(newCfg.CastDeviceName)
 	}
