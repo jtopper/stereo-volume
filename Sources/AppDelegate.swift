@@ -58,10 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Volume control
 
     private func adjustVolume(_ delta: Float) {
-        guard !currentVolume.muted else { return }
-        let newLevel = min(1, max(0, currentVolume.level + delta))
+        let base = currentVolume.muted ? volumeBeforeMute : currentVolume.level
+        let newLevel = min(1, max(0, base + delta))
+        currentVolume.muted = false
         currentVolume.level = newLevel
         statusBar.update(volume: currentVolume)
+        cast.setMuted(false)
         cast.setVolume(newLevel)
     }
 
