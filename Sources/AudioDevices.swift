@@ -46,10 +46,11 @@ enum AudioDevices {
             mSelector: kAudioObjectPropertyName,
             mScope:    kAudioObjectPropertyScopeGlobal,
             mElement:  kAudioObjectPropertyElementMain)
-        var cfName: CFString? = nil
-        var size = UInt32(MemoryLayout<CFString?>.size)
+        // Use Unmanaged to receive the retained CFStringRef without confusing ARC.
+        var cfName: Unmanaged<CFString>? = nil
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         guard AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &cfName) == noErr,
-              let name = cfName as String?
+              let name = cfName?.takeRetainedValue() as String?
         else { return nil }
         return name
     }

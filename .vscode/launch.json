@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:stereo-vol}",
+            "name": "Debug stereo-vol",
+            "target": "stereo-vol",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug stereo-vol"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:stereo-vol}",
+            "name": "Release stereo-vol",
+            "target": "stereo-vol",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release stereo-vol"
+        }
+    ]
+}
