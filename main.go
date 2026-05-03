@@ -3,13 +3,20 @@ package main
 /*
 #cgo LDFLAGS: -framework Quartz -framework Carbon -framework AppKit -framework CoreAudio
 #include <stdlib.h>
-extern void runEventTap();
-char* getDefaultAudioOutputDeviceName();
+
+extern void runEventTap(void);
+extern char *getDefaultAudioOutputDeviceName(void);
+
+extern void startStatusBar(void);
+extern void setStatusTitle(const char *title);
+extern void setVolumeSlider(float vol, const char *label);
+extern void setMuteItemTitle(const char *title);
+extern void setPrefsItemEnabled(int enabled);
+extern void quitApp(void);
 */
 import "C"
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"math"
@@ -18,9 +25,16 @@ import (
 	"time"
 	"unsafe"
 
-	"fyne.io/systray"
 	"github.com/vishen/go-chromecast/application"
 	"github.com/vishen/go-chromecast/dns"
+	"golang.org/x/net/context"
+)
+
+const (
+	keyVolumeUp   = 0 // NX_KEYTYPE_SOUND_UP
+	keyVolumeDown = 1 // NX_KEYTYPE_SOUND_DOWN
+	keyVolumeMute = 7 // NX_KEYTYPE_MUTE
+	step          = 0.02
 )
 
 var (
@@ -30,10 +44,34 @@ var (
 	appMu sync.RWMutex
 	app   *application.Application
 
-	menuVolume *systray.MenuItem
-	menuMute   *systray.MenuItem
-	menuPrefs  *systray.MenuItem
+	volumeBeforeMute float32
+
+	// Debounce slider → Chromecast volume calls.
+	sliderTimerMu sync.Mutex
+	sliderTimer   *time.Timer
 )
+
+// ── Display helpers ───────────────────────────────────────────────────────
+
+func cset(s string) *C.char { return C.CString(s) }
+func cfree(p *C.char)       { C.free(unsafe.Pointer(p)) }
+
+// updateDisplay refreshes the status bar title, slider position, and mute label.
+// Safe to call from any goroutine.
+func updateDisplay(vol float32, muted bool) {
+	if muted {
+		t := cset("🔇"); C.setStatusTitle(t); cfree(t)
+		l := cset("Muted"); C.setVolumeSlider(C.float(vol), l); cfree(l)
+		m := cset("Unmute"); C.setMuteItemTitle(m); cfree(m)
+	} else {
+		t := cset("🔊"); C.setStatusTitle(t); cfree(t)
+		l := cset(fmt.Sprintf("%d%%", int(math.Round(float64(vol)*100))))
+		C.setVolumeSlider(C.float(vol), l); cfree(l)
+		m := cset("Mute"); C.setMuteItemTitle(m); cfree(m)
+	}
+}
+
+// ── Key event handler (called from C event tap) ───────────────────────────
 
 //export goHandleKey
 func goHandleKey(keycode int) C.int {
@@ -70,16 +108,62 @@ func goHandleKey(keycode int) C.int {
 	return 1
 }
 
-const (
-	keyVolumeUp   = 0 // NX_KEYTYPE_SOUND_UP
-	keyVolumeDown = 1 // NX_KEYTYPE_SOUND_DOWN
-	keyVolumeMute = 7 // NX_KEYTYPE_MUTE
-	step          = 0.02
-)
+// ── Slider callback (called from ObjC on main thread) ────────────────────
+
+//export goSliderChanged
+func goSliderChanged(value C.float) {
+	vol := float32(value)
+	// Update title immediately so it feels responsive.
+	t := cset("🔊"); C.setStatusTitle(t); cfree(t)
+	// Debounce: only send to Chromecast 80 ms after the last movement.
+	sliderTimerMu.Lock()
+	if sliderTimer != nil {
+		sliderTimer.Stop()
+	}
+	sliderTimer = time.AfterFunc(80*time.Millisecond, func() {
+		appMu.RLock()
+		a := app
+		appMu.RUnlock()
+		if a == nil {
+			return
+		}
+		if err := a.SetVolume(vol); err != nil {
+			log.Printf("slider: error setting volume: %v", err)
+		}
+	})
+	sliderTimerMu.Unlock()
+}
+
+// ── Menu item callbacks (called from ObjC on main thread) ─────────────────
+
+//export goMenuClicked
+func goMenuClicked(tag C.int) {
+	switch int(tag) {
+	case 1: // Mute / Unmute
+		appMu.RLock()
+		a := app
+		appMu.RUnlock()
+		if a != nil {
+			go toggleMute(a)
+		}
+	case 2: // Preferences
+		go openPreferences()
+	case 3: // Quit
+		appMu.RLock()
+		a := app
+		appMu.RUnlock()
+		if a != nil {
+			a.Close(false)
+		}
+		C.quitApp()
+	}
+}
+
+// ── Volume control ────────────────────────────────────────────────────────
 
 func currentVolume(a *application.Application) float32 {
 	if err := a.Update(); err != nil {
-		log.Printf("error reading volume from device: %v", err)
+		log.Printf("error reading volume: %v", err)
 		return 0.5
 	}
 	if v := a.Volume(); v != nil {
@@ -88,32 +172,18 @@ func currentVolume(a *application.Application) float32 {
 	return 0.5
 }
 
-func setMenuVolume(vol float32, muted bool) {
-	if muted {
-		systray.SetTitle("🔇")
-		menuVolume.SetTitle("Volume: muted")
-		menuMute.SetTitle("Unmute")
-	} else {
-		systray.SetTitle("🔊")
-		menuVolume.SetTitle(fmt.Sprintf("Volume: %.0f%%", vol*100))
-		menuMute.SetTitle("Mute")
-	}
-}
-
 func adjustVolume(a *application.Application, delta float32) {
 	vol := float32(math.Max(0, math.Min(1, float64(currentVolume(a)+delta))))
 	if err := a.SetVolume(vol); err != nil {
 		log.Printf("error setting volume: %v", err)
 		return
 	}
-	setMenuVolume(vol, false)
+	updateDisplay(vol, false)
 }
-
-var volumeBeforeMute float32
 
 func toggleMute(a *application.Application) {
 	if err := a.Update(); err != nil {
-		log.Printf("error reading state from device: %v", err)
+		log.Printf("error reading state: %v", err)
 		return
 	}
 	v := a.Volume()
@@ -129,37 +199,36 @@ func toggleMute(a *application.Application) {
 			log.Printf("error restoring volume: %v", err)
 			return
 		}
-		setMenuVolume(volumeBeforeMute, false)
+		updateDisplay(volumeBeforeMute, false)
 	} else {
 		volumeBeforeMute = v.Level
 		if err := a.SetMuted(true); err != nil {
 			log.Printf("error muting: %v", err)
 			return
 		}
-		setMenuVolume(v.Level, true)
+		updateDisplay(v.Level, true)
 	}
 }
 
-// connectDevice discovers and connects to the named Chromecast.
-// Safe to call from any goroutine; updates the menu accordingly.
+// ── Chromecast connection ─────────────────────────────────────────────────
+
 func connectDevice(castName string) {
-	menuVolume.SetTitle("Connecting…")
-	menuMute.Disable()
-	systray.SetTitle("🔊")
+	t := cset("🔊"); C.setStatusTitle(t); cfree(t)
+	l := cset("Connecting…"); C.setVolumeSlider(0.5, l); cfree(l)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	entry, err := dns.DiscoverCastDNSEntryByName(ctx, nil, castName)
 	if err != nil {
-		menuVolume.SetTitle("Device not found")
+		l := cset("Not found"); C.setVolumeSlider(0, l); cfree(l)
 		log.Printf("could not find %q: %v", castName, err)
 		return
 	}
 
 	newApp := application.NewApplication()
 	if err := newApp.Start(entry.GetAddr(), entry.GetPort()); err != nil {
-		menuVolume.SetTitle("Connection failed")
+		l := cset("Failed"); C.setVolumeSlider(0, l); cfree(l)
 		log.Printf("could not connect to %q: %v", castName, err)
 		return
 	}
@@ -172,69 +241,30 @@ func connectDevice(castName string) {
 	appMu.Unlock()
 
 	if v := newApp.Volume(); v != nil {
-		setMenuVolume(v.Level, v.Muted)
+		updateDisplay(v.Level, v.Muted)
 	}
-	menuMute.Enable()
 	log.Printf("connected to %s", castName)
 }
 
-func onReady() {
-	systray.SetTitle("🔊")
-	systray.SetTooltip("stereo-vol")
+// ── Entry point ───────────────────────────────────────────────────────────
 
-	menuVolume = systray.AddMenuItem("Not configured", "")
-	menuVolume.Disable()
-	menuMute = systray.AddMenuItem("Mute", "")
-	menuMute.Disable()
-	systray.AddSeparator()
-	menuPrefs = systray.AddMenuItem("Preferences…", "")
-	systray.AddSeparator()
-	menuQuit := systray.AddMenuItem("Quit", "")
-
-	// Load persisted config and connect if configured.
+func main() {
 	cfgMu.Lock()
 	cfg = loadConfig()
 	castName := cfg.CastDeviceName
 	cfgMu.Unlock()
 
-	if castName != "" {
-		go connectDevice(castName)
-	}
-
-	// Start the event tap on a dedicated OS thread once systray is up.
+	// Event tap on its own locked OS thread.
 	go func() {
 		runtime.LockOSThread()
 		C.runEventTap()
 	}()
 
-	// Handle menu clicks.
-	go func() {
-		for {
-			select {
-			case <-menuMute.ClickedCh:
-				appMu.RLock()
-				a := app
-				appMu.RUnlock()
-				if a != nil {
-					toggleMute(a)
-				}
-			case <-menuPrefs.ClickedCh:
-				go openPreferences()
-			case <-menuQuit.ClickedCh:
-				appMu.RLock()
-				a := app
-				appMu.RUnlock()
-				if a != nil {
-					a.Close(false)
-				}
-				systray.Quit()
-			}
-		}
-	}()
-}
+	// Connect to Chromecast in background.
+	if castName != "" {
+		go connectDevice(castName)
+	}
 
-func onExit() {}
-
-func main() {
-	systray.Run(onReady, onExit)
+	// Blocks on [NSApp run]; must be called on the main OS thread.
+	C.startStatusBar()
 }

@@ -11,6 +11,8 @@ int showConfigDialog(
     const char *currentAudio, const char *currentCast,
     char **outAudio, char **outCast
 );
+
+void setPrefsItemEnabled(int enabled);
 */
 import "C"
 
@@ -120,12 +122,8 @@ func freeCStringSlice(cs []*C.char) {
 // openPreferences discovers devices, shows the preferences dialog, and saves
 // if the user confirms. Must be called from a goroutine (not the main thread).
 func openPreferences() {
-	menuPrefs.SetTitle("Discovering devices…")
-	menuPrefs.Disable()
-	defer func() {
-		menuPrefs.SetTitle("Preferences…")
-		menuPrefs.Enable()
-	}()
+	C.setPrefsItemEnabled(0)
+	defer C.setPrefsItemEnabled(1)
 
 	audioNames := audioOutputDeviceNames()
 	castNames := discoverChromecasts()
