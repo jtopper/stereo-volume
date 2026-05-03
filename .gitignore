@@ -1,1 +1,4 @@
-stereo-vol
+.build/
+*.o
+*.d
+stereo-vol.xcodeproj/
