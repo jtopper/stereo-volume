@@ -4,6 +4,9 @@ A macOS menubar utility that maps the keyboard volume keys to a Chromecast-conne
 
 When the configured audio output is selected as the system default, stereo-vol intercepts the volume up, volume down, and mute keys and sends the corresponding commands to a Chromecast receiver on the local network — instead of adjusting the Mac's own volume. A menubar slider lets you control volume with the mouse, and a live readout reflects changes made from any source.
 
+> [!WARNING]
+> This application was entirely vibe coded, over a few hours, with Claude Code. This includes this README file! It works the way I need, with the devices I own. I have no intention of supporting your use of this code, and I make no warranty about its safety or fitness for purpose.
+
 ## Requirements
 
 - macOS 13 or later
