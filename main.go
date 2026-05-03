@@ -46,10 +46,13 @@ var (
 
 	volumeBeforeMute float32
 
-	// Debounce slider → Chromecast volume calls.
+	// Throttle slider → Chromecast volume calls.
 	sliderTimerMu sync.Mutex
 	sliderTimer   *time.Timer
+	lastSliderSet time.Time
 )
+
+const sliderThrottle = 100 * time.Millisecond
 
 // ── Display helpers ───────────────────────────────────────────────────────
 
@@ -115,23 +118,43 @@ func goSliderChanged(value C.float) {
 	vol := float32(value)
 	// Update title immediately so it feels responsive.
 	t := cset("🔊"); C.setStatusTitle(t); cfree(t)
-	// Debounce: only send to Chromecast 80 ms after the last movement.
+
+	// Throttle: send immediately if enough time has passed since the last
+	// update, otherwise schedule a trailing call so the final value always lands.
 	sliderTimerMu.Lock()
 	if sliderTimer != nil {
 		sliderTimer.Stop()
+		sliderTimer = nil
 	}
-	sliderTimer = time.AfterFunc(80*time.Millisecond, func() {
-		appMu.RLock()
-		a := app
-		appMu.RUnlock()
-		if a == nil {
-			return
-		}
-		if err := a.SetVolume(vol); err != nil {
-			log.Printf("slider: error setting volume: %v", err)
-		}
-	})
-	sliderTimerMu.Unlock()
+	delay := sliderThrottle - time.Since(lastSliderSet)
+	if delay <= 0 {
+		// Enough time has passed — apply immediately.
+		lastSliderSet = time.Now()
+		sliderTimerMu.Unlock()
+		go applySliderVolume(vol)
+	} else {
+		// Too soon — schedule a trailing call with the latest value.
+		sliderTimer = time.AfterFunc(delay, func() {
+			sliderTimerMu.Lock()
+			lastSliderSet = time.Now()
+			sliderTimer = nil
+			sliderTimerMu.Unlock()
+			applySliderVolume(vol)
+		})
+		sliderTimerMu.Unlock()
+	}
+}
+
+func applySliderVolume(vol float32) {
+	appMu.RLock()
+	a := app
+	appMu.RUnlock()
+	if a == nil {
+		return
+	}
+	if err := a.SetVolume(vol); err != nil {
+		log.Printf("slider: error setting volume: %v", err)
+	}
 }
 
 // ── Menu item callbacks (called from ObjC on main thread) ─────────────────
