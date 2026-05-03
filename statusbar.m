@@ -143,10 +143,10 @@ void setVolumeSlider(float vol, const char *label) {
     });
 }
 
-void setMuteItemTitle(const char *title) {
-    NSString *s = @(title);
+void setMuteItemState(int muted) {
+    NSControlStateValue state = muted ? NSControlStateValueOn : NSControlStateValueOff;
     dispatch_async(dispatch_get_main_queue(), ^{
-        appDelegate.muteItem.title = s;
+        appDelegate.muteItem.state = state;
     });
 }
 

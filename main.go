@@ -10,7 +10,7 @@ extern char *getDefaultAudioOutputDeviceName(void);
 extern void startStatusBar(void);
 extern void setStatusTitle(const char *title);
 extern void setVolumeSlider(float vol, const char *label);
-extern void setMuteItemTitle(const char *title);
+extern void setMuteItemState(int muted);
 extern void setPrefsItemEnabled(int enabled);
 extern void quitApp(void);
 */
@@ -65,12 +65,12 @@ func updateDisplay(vol float32, muted bool) {
 	if muted {
 		t := cset("🔇"); C.setStatusTitle(t); cfree(t)
 		l := cset("Muted"); C.setVolumeSlider(C.float(vol), l); cfree(l)
-		m := cset("Unmute"); C.setMuteItemTitle(m); cfree(m)
+		C.setMuteItemState(1)
 	} else {
 		t := cset("🔊"); C.setStatusTitle(t); cfree(t)
 		l := cset(fmt.Sprintf("%d%%", int(math.Round(float64(vol)*100))))
 		C.setVolumeSlider(C.float(vol), l); cfree(l)
-		m := cset("Mute"); C.setMuteItemTitle(m); cfree(m)
+		C.setMuteItemState(0)
 	}
 }
 
