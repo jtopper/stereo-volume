@@ -34,6 +34,13 @@ final class VolumeSliderView: NSView {
 
     // MARK: - Public
 
+    var isEnabled: Bool = true {
+        didSet {
+            slider.isEnabled  = isEnabled
+            pctLabel.textColor = isEnabled ? .labelColor : .tertiaryLabelColor
+        }
+    }
+
     func setVolume(_ level: Float, label: String) {
         slider.floatValue    = level
         pctLabel.stringValue = label

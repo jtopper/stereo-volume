@@ -43,6 +43,11 @@ final class StatusBarController {
         sliderView.setVolume(0, label: text)
     }
 
+    func setConfigured(_ configured: Bool) {
+        sliderView.isEnabled   = configured
+        muteItem.isEnabled     = configured
+    }
+
     func setPreferencesEnabled(_ enabled: Bool) {
         prefsItem.isEnabled = enabled
     }
@@ -51,6 +56,7 @@ final class StatusBarController {
 
     private func buildMenu() {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
         let sliderItem = NSMenuItem()
         sliderItem.view = sliderView

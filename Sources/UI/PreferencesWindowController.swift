@@ -15,12 +15,12 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Open
 
-    func open(current config: Config) {
+    func open(current config: Config, firstRun: Bool = false) {
         guard window == nil else { window?.makeKeyAndOrderFront(nil); return }
         currentConfig = config
 
         // Phase 1: build window with audio devices immediately.
-        buildWindow(audioDevices: AudioDevices.outputDeviceNames(), current: config)
+        buildWindow(audioDevices: AudioDevices.outputDeviceNames(), current: config, firstRun: firstRun)
 
         guard let win = window else { return }
         win.makeKeyAndOrderFront(nil)
@@ -42,14 +42,14 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - Build window
 
-    private func buildWindow(audioDevices: [String], current config: Config) {
+    private func buildWindow(audioDevices: [String], current config: Config, firstRun: Bool = false) {
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 430, height: 150),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        win.title    = "stereo-vol Preferences"
+        win.title    = firstRun ? "stereo-vol — First Time Setup" : "stereo-vol Preferences"
         win.delegate = self
         win.center()
         guard let cv = win.contentView else { return }

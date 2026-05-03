@@ -6,6 +6,7 @@ import Foundation
 // All methods are called from CastController's actor context.
 final class CastConnection {
     private var connection: NWConnection?
+    var onReady: (() -> Void)?
     var onMessage: ((CastMessage) -> Void)?
     var onDisconnect: (() -> Void)?
 
@@ -18,6 +19,8 @@ final class CastConnection {
 
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
+            case .ready:
+                self?.onReady?()
             case .failed, .cancelled:
                 self?.onDisconnect?()
             default:

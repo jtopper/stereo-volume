@@ -29,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire up Cast controller callback — ignore feedback while slider is being dragged.
         cast.onVolumeChanged = { [weak self] vol in
             guard let self else { return }
+            // Enable controls on first successful volume reading from the device.
+            self.statusBar.setConfigured(true)
             guard Date() >= self.suppressFeedbackUntil else { return }
             self.currentVolume = vol
             self.statusBar.update(volume: vol)
@@ -41,12 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         interceptor.onMute       = { [weak self] in self?.handleMute() }
         interceptor.start()
 
-        // Connect to configured Chromecast
-        if !config.castDeviceName.isEmpty {
+        // Connect to configured Chromecast, or prompt for first-time setup.
+        if !config.castDeviceName.isEmpty && !config.audioDeviceName.isEmpty {
             statusBar.setConnectionStatus("Connecting…")
             connectToCast(named: config.castDeviceName)
         } else {
+            statusBar.setConfigured(false)
             statusBar.setConnectionStatus("Not configured")
+            showPreferences(firstRun: true)
         }
     }
 
@@ -78,24 +82,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Preferences
 
-    private func showPreferences() {
+    private func showPreferences(firstRun: Bool = false) {
         prefs.onSave = { [weak self] newConfig in
             guard let self else { return }
             self.config = newConfig
             try? newConfig.save()
             self.interceptor.wantedDevice = newConfig.audioDeviceName
+            self.statusBar.setConfigured(false)
             self.statusBar.setConnectionStatus("Connecting…")
             self.connectToCast(named: newConfig.castDeviceName)
         }
-        prefs.open(current: config)
+        prefs.open(current: config, firstRun: firstRun)
     }
 
     // MARK: - Discovery + connect
 
     private func connectToCast(named name: String) {
         Task {
-            let devices = await ChromecastDiscovery.discover(timeout: .seconds(10))
-            guard let device = devices.first(where: { $0.name == name }) else {
+            guard let device = await ChromecastDiscovery.discover(named: name, timeout: .seconds(10)) else {
                 self.statusBar.setConnectionStatus("Not found")
                 return
             }

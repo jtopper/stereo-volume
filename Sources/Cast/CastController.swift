@@ -54,18 +54,16 @@ final class CastController {
 
     private func startConnection() {
         guard let endpoint else { return }
+        conn.onReady      = { [weak self] in    Task { @MainActor [weak self] in self?.handleReady() } }
         conn.onMessage    = { [weak self] msg in Task { @MainActor [weak self] in self?.handle(msg) } }
         conn.onDisconnect = { [weak self] in    Task { @MainActor [weak self] in self?.scheduleReconnect() } }
         conn.connect(to: endpoint)
         startHeartbeat()
-        // Send CONNECT on the transport namespace, then ask for current volume.
-        Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            self.send(namespace: CastNamespace.connection,
-                      payload: #"{"type":"CONNECT"}"#)
-            try? await Task.sleep(for: .milliseconds(200))
-            self.requestStatus()
-        }
+    }
+
+    private func handleReady() {
+        send(namespace: CastNamespace.connection, payload: #"{"type":"CONNECT"}"#)
+        requestStatus()
     }
 
     private func scheduleReconnect() {
