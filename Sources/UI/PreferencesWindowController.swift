@@ -52,7 +52,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         win.title    = "stereo-vol Preferences"
         win.delegate = self
         win.center()
-        let cv = win.contentView!
+        guard let cv = win.contentView else { return }
 
         // Audio Output row
         addLabel("Audio Output:", to: cv, frame: NSRect(x: 20, y: 105, width: 114, height: 22))
@@ -108,7 +108,7 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
     // MARK: - Phase 2: populate cast dropdown
 
     private func populateCast(devices: [CastDevice], current: String) {
-        guard let win = window else { return }   // dismissed during discovery
+        guard window != nil else { return }   // dismissed during discovery
 
         castSpinner?.stopAnimation(nil); castSpinner?.isHidden = true
         castStatus?.isHidden = true
@@ -126,7 +126,6 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
             cp.isEnabled          = true
             saveButton?.isEnabled = true
         }
-        _ = win  // suppress unused warning
     }
 
     // MARK: - Actions

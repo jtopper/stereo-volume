@@ -52,7 +52,10 @@ final class CastConnection {
                let msg = try? CastMessage(data: data) {
                 self?.onMessage?(msg)
             }
-            if error == nil {
+            if let error {
+                print("stereo-vol: receive error: \(error)")
+                self?.onDisconnect?()
+            } else {
                 self?.receiveNext(conn)
             }
         }

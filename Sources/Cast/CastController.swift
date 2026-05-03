@@ -71,13 +71,9 @@ final class CastController {
     private func scheduleReconnect() {
         heartbeat?.cancel()
         reconnect = Task {
-            let delay: UInt64 = 2_000_000_000   // 2 s
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: delay)
-                guard !Task.isCancelled else { return }
-                await MainActor.run { self.startConnection() }
-                break
-            }
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self.startConnection() }
         }
     }
 
@@ -107,16 +103,27 @@ final class CastController {
     }
 
     private func parseReceiverStatus(_ json: String) {
+        struct Response: Decodable {
+            let type: String
+            let status: Status?
+            struct Status: Decodable {
+                let volume: Volume?
+                struct Volume: Decodable {
+                    let level: Float?
+                    let muted: Bool?
+                }
+            }
+        }
         guard let data = json.data(using: .utf8),
-              let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = obj["type"] as? String, type == "RECEIVER_STATUS",
-              let status = obj["status"] as? [String: Any],
-              let vol    = status["volume"] as? [String: Any]
+              let response = try? JSONDecoder().decode(Response.self, from: data),
+              response.type == "RECEIVER_STATUS",
+              let vol = response.status?.volume
         else { return }
 
-        let level = (vol["level"] as? NSNumber)?.floatValue ?? 0
-        let muted = (vol["muted"] as? Bool) ?? false
-        onVolumeChanged?(ReceiverVolume(level: level, muted: muted))
+        onVolumeChanged?(ReceiverVolume(
+            level: vol.level ?? 0,
+            muted: vol.muted ?? false
+        ))
     }
 
     private func send(namespace: String,
