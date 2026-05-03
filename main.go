@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime"
 	"unsafe"
 
+	"fyne.io/systray"
 	"github.com/vishen/go-chromecast/application"
 	"github.com/vishen/go-chromecast/dns"
 )
@@ -28,7 +30,11 @@ const (
 	audioDeviceName = "Panasonic USB Audio 2"  // macOS audio output device name (System Settings > Sound > Output)
 )
 
-var app *application.Application
+var (
+	app        *application.Application
+	menuVolume *systray.MenuItem
+	menuMute   *systray.MenuItem
+)
 
 //export goHandleKey
 func goHandleKey(keycode int) C.int {
@@ -41,6 +47,10 @@ func goHandleKey(keycode int) C.int {
 
 	if name != audioDeviceName {
 		return 0 // different output device — pass through
+	}
+
+	if app == nil {
+		return 0 // not yet connected
 	}
 
 	switch int(keycode) {
@@ -65,13 +75,25 @@ func currentVolume() float32 {
 	return 0.5
 }
 
+func setMenuVolume(vol float32, muted bool) {
+	if muted {
+		systray.SetTitle("🔇")
+		menuVolume.SetTitle("Volume: muted")
+		menuMute.SetTitle("Unmute")
+	} else {
+		systray.SetTitle("🔊")
+		menuVolume.SetTitle(fmt.Sprintf("Volume: %.0f%%", vol*100))
+		menuMute.SetTitle("Mute")
+	}
+}
+
 func adjustVolume(delta float32) {
 	vol := float32(math.Max(0, math.Min(1, float64(currentVolume()+delta))))
 	if err := app.SetVolume(vol); err != nil {
 		log.Printf("error setting volume: %v", err)
 		return
 	}
-	fmt.Printf("Volume: %.0f%%\n", vol*100)
+	setMenuVolume(vol, false)
 }
 
 var volumeBeforeMute float32
@@ -94,36 +116,77 @@ func toggleMute() {
 			log.Printf("error restoring volume: %v", err)
 			return
 		}
-		fmt.Printf("Unmuted, volume: %.0f%%\n", volumeBeforeMute*100)
+		setMenuVolume(volumeBeforeMute, false)
 	} else {
 		volumeBeforeMute = v.Level
 		if err := app.SetMuted(true); err != nil {
 			log.Printf("error muting: %v", err)
 			return
 		}
-		fmt.Printf("Muted (was %.0f%%)\n", volumeBeforeMute*100)
+		setMenuVolume(v.Level, true)
 	}
 }
 
+func onReady() {
+	systray.SetTitle("🔊")
+	systray.SetTooltip(deviceName)
+
+	menuVolume = systray.AddMenuItem("Connecting…", "")
+	menuVolume.Disable()
+	menuMute = systray.AddMenuItem("Mute", "")
+	menuMute.Disable()
+	systray.AddSeparator()
+	menuQuit := systray.AddMenuItem("Quit", "")
+
+	// Connect to Chromecast in the background
+	go func() {
+		ctx := context.Background()
+		entry, err := dns.DiscoverCastDNSEntryByName(ctx, nil, deviceName)
+		if err != nil {
+			menuVolume.SetTitle("Device not found")
+			log.Printf("could not find device %q: %v", deviceName, err)
+			return
+		}
+
+		app = application.NewApplication()
+		if err := app.Start(entry.GetAddr(), entry.GetPort()); err != nil {
+			menuVolume.SetTitle("Connection failed")
+			log.Printf("could not connect: %v", err)
+			return
+		}
+
+		if v := app.Volume(); v != nil {
+			setMenuVolume(v.Level, v.Muted)
+		}
+		menuMute.Enable()
+
+		// Start the event tap on a dedicated locked OS thread
+		go func() {
+			runtime.LockOSThread()
+			C.runEventTap()
+		}()
+	}()
+
+	// Handle menu clicks
+	go func() {
+		for {
+			select {
+			case <-menuMute.ClickedCh:
+				if app != nil {
+					toggleMute()
+				}
+			case <-menuQuit.ClickedCh:
+				if app != nil {
+					app.Close(false)
+				}
+				systray.Quit()
+			}
+		}
+	}()
+}
+
+func onExit() {}
+
 func main() {
-	// Discover the device
-	ctx := context.Background()
-	entry, err := dns.DiscoverCastDNSEntryByName(ctx, nil, deviceName)  // context + nil interface
-	if err != nil {
-		log.Fatalf("could not find device %q: %v", deviceName, err)
-	}
-
-	app = application.NewApplication()
-	if err := app.Start(entry.GetAddr(), entry.GetPort()); err != nil {
-		log.Fatalf("could not connect: %v", err)
-	}
-	defer app.Close(false)  // false = don't stop the app on the device
-
-	fmt.Printf("Connected to %s\n", deviceName)
-	if v := app.Volume(); v != nil {
-		fmt.Printf("Current volume: %.0f%%\n", v.Level*100)
-	}
-	fmt.Println("Listening for volume keys...")
-
-	C.runEventTap()
+	systray.Run(onReady, onExit)
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jtopper.stereo-vol</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update this path after copying the binary to its install location -->
+        <string>/usr/local/bin/stereo-vol</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/stereo-vol.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/stereo-vol.log</string>
+</dict>
+</plist>
