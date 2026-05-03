@@ -37,10 +37,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Start event interceptor
-        interceptor.wantedDevice = config.audioDeviceName
-        interceptor.onVolumeUp   = { [weak self] in self?.adjustVolume(+0.02) }
-        interceptor.onVolumeDown = { [weak self] in self?.adjustVolume(-0.02) }
-        interceptor.onMute       = { [weak self] in self?.handleMute() }
+        interceptor.wantedDevice      = config.audioDeviceName
+        interceptor.onVolumeUp        = { [weak self] in self?.adjustVolume(+0.02) }
+        interceptor.onVolumeDown      = { [weak self] in self?.adjustVolume(-0.02) }
+        interceptor.onMute            = { [weak self] in self?.handleMute() }
+        interceptor.onPermissionDenied = { [weak self] in self?.showAccessibilityAlert() }
         interceptor.start()
 
         // Connect to configured Chromecast, or prompt for first-time setup.
@@ -77,6 +78,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             volumeBeforeMute = currentVolume.level
             cast.setMuted(true)
+        }
+    }
+
+    // MARK: - Accessibility permission
+
+    private func showAccessibilityAlert() {
+        let alert = NSAlert()
+        alert.messageText     = "Accessibility Permission Required"
+        alert.informativeText = "stereo-vol needs Accessibility access to intercept media keys. Grant permission in System Settings → Privacy & Security → Accessibility, then restart the app."
+        alert.alertStyle      = .warning
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+            NSWorkspace.shared.open(url)
         }
     }
 

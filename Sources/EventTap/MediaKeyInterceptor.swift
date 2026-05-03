@@ -1,23 +1,33 @@
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 
 // Intercepts system media key events via CGEventTap.
 // Only intercepts if the current default audio output matches `wantedDevice`.
 // All callbacks are dispatched to the main queue.
 final class MediaKeyInterceptor {
-    var onVolumeUp:   (() -> Void)?
-    var onVolumeDown: (() -> Void)?
-    var onMute:       (() -> Void)?
+    var onVolumeUp:        (() -> Void)?
+    var onVolumeDown:      (() -> Void)?
+    var onMute:            (() -> Void)?
+    var onPermissionDenied:(() -> Void)?
 
     // The audio output device name we want to intercept keys for.
     var wantedDevice: String = ""
 
-    private var tapPort:  CFMachPort?
+    private var tapPort:   CFMachPort?
     private var tapThread: Thread?
 
-    // MARK: - Start / Stop
+    // MARK: - Start
 
     func start() {
+        // Check Accessibility permission before attempting the event tap.
+        // If not granted, surface the error immediately rather than letting
+        // the tap silently fail.
+        guard AXIsProcessTrusted() else {
+            DispatchQueue.main.async { [weak self] in self?.onPermissionDenied?() }
+            return
+        }
+
         let thread = Thread { [weak self] in self?.runTap() }
         thread.qualityOfService = .userInteractive
         thread.start()
@@ -27,7 +37,6 @@ final class MediaKeyInterceptor {
     // MARK: - Private
 
     private func runTap() {
-        // The CGEventTap callback must be a C function pointer; pass self as refcon.
         let mask = CGEventMask(1 << 14)   // NX_SYSDEFINED = 14
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -41,7 +50,8 @@ final class MediaKeyInterceptor {
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("stereo-vol: could not create event tap — check Accessibility permission")
+            print("stereo-vol: could not create event tap — Accessibility permission not granted")
+            DispatchQueue.main.async { [weak self] in self?.onPermissionDenied?() }
             return
         }
 
@@ -55,12 +65,11 @@ final class MediaKeyInterceptor {
     private func handle(proxy: CGEventTapProxy,
                         type: CGEventType,
                         event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Only act on NX_SYSDEFINED (14) events.
         guard type.rawValue == 14 else { return Unmanaged.passRetained(event) }
 
         guard let nsEvent = NSEvent(cgEvent: event),
               nsEvent.type == .systemDefined,
-              nsEvent.subtype.rawValue == 8,   // media key subtype
+              nsEvent.subtype.rawValue == 8,
               nsEvent.data1 != -1
         else { return Unmanaged.passRetained(event) }
 
@@ -69,15 +78,13 @@ final class MediaKeyInterceptor {
         let keyDown  = ((keyFlags & 0xFF00) >> 8) == 0xA
         guard keyDown else { return Unmanaged.passRetained(event) }
 
-        // Only intercept volume keys.
         guard keyCode == 0 || keyCode == 1 || keyCode == 7 else {
             return Unmanaged.passRetained(event)
         }
 
-        // Check the current audio output device.
         guard let current = AudioDevices.defaultOutputName(),
               current == wantedDevice
-        else { return Unmanaged.passRetained(event) }   // pass through
+        else { return Unmanaged.passRetained(event) }
 
         let code = keyCode
         DispatchQueue.main.async { [weak self] in
